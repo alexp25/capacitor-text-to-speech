@@ -1,13 +1,28 @@
 import AVFoundation
 import Capacitor
 
+enum QUEUE_STRATEGY: Int {
+    case QUEUE_ADD = 1, QUEUE_FLUSH = 0
+}
+
 @objc public class TextToSpeech: NSObject, AVSpeechSynthesizerDelegate {
     let synthesizer = AVSpeechSynthesizer()
     var calls: [CAPPluginCall] = []
+    let queue = DispatchQueue(label: "backgroundAudioSetup", qos: .userInitiated, attributes: [], autoreleaseFrequency: .inherit, target: nil)
 
     override init() {
         super.init()
         self.synthesizer.delegate = self
+        // set session in background to avoid UI hangs.
+        queue.async {
+            do {
+                let avAudioSessionCategory: AVAudioSession.Category = .playback
+                try AVAudioSession.sharedInstance().setCategory(avAudioSessionCategory, mode: .default, options: .duckOthers)
+                try AVAudioSession.sharedInstance().setActive(true)
+            } catch {
+                print("Error setting up AVAudioSession: \(error)")
+            }
+        }
     }
 
     public func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
@@ -18,17 +33,10 @@ import Capacitor
         self.resolveCurrentCall()
     }
 
-    @objc public func speak(_ text: String, _ lang: String, _ rate: Float, _ pitch: Float, _ category: String, _ volume: Float, _ voice: Int, _ call: CAPPluginCall) throws {
-        self.synthesizer.stopSpeaking(at: .immediate)
-
-        var avAudioSessionCategory = AVAudioSession.Category.ambient
-        if category != "ambient" {
-            avAudioSessionCategory = AVAudioSession.Category.playback
+    @objc public func speak(_ text: String, _ lang: String, _ rate: Float, _ pitch: Float, _ category: String, _ volume: Float, _ voice: Int, _ queueStrategy: Int, _ call: CAPPluginCall) throws {
+        if queueStrategy == QUEUE_STRATEGY.QUEUE_FLUSH.rawValue {
+            self.synthesizer.stopSpeaking(at: .immediate)
         }
-
-        try AVAudioSession.sharedInstance().setCategory(avAudioSessionCategory, mode: .default, options: AVAudioSession.CategoryOptions.duckOthers)
-        try AVAudioSession.sharedInstance().setActive(true)
-
         self.calls.append(call)
 
         let utterance = AVSpeechUtterance(string: text)
@@ -66,22 +74,14 @@ import Capacitor
 
     // Adjust rate for a closer match to other platform.
     @objc private func adjustRate(_ rate: Float) -> Float {
-        let baseRate = AVSpeechUtteranceDefaultSpeechRate
-        if rate == 1 {
-            return baseRate
+        let baseRate: Float = AVSpeechUtteranceDefaultSpeechRate
+        if rate >= 1.0 {
+            return (0.1 * rate) + (baseRate - 0.1)
         }
-        if rate > baseRate {
-            return baseRate + (rate * 0.025)
-        }
-        return rate / 2
+        return rate * baseRate
     }
 
     @objc private func resolveCurrentCall() {
-        do {
-            try AVAudioSession.sharedInstance().setActive(false)
-        } catch {
-            CAPLog.print(error.localizedDescription)
-        }
         guard let call = calls.first else {
             return
         }
